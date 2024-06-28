@@ -1,21 +1,23 @@
 /**:
   ros__parameters:
     # -- system --
-    enable_path_smoothing: false # enable path smoothing
-    path_filter_moving_ave_num: 25 # param of moving average filter for path smoothing
-    traj_resample_dist: 0.1 # path resampling interval [m]
+    enable_path_smoothing: true     # enable path smoothing
+    path_filter_moving_ave_num: 25  # param of moving average filter for path smoothing
+    traj_resample_dist: 0.1         # path resampling interval [m]
 
     # -- sliding mode control parameters --
-    lambda: 24.0              # sliding surface error gain
+    lambda: 10.0              # sliding surface error gain
     alpha: 0.8                # super-twisting error gain
-    beta: 0.04                # super-twisting error derivative gain
-    gamma: 1.0                # variable boundary layer gain, small value = accurate but chattering, big value = smooth but less accurate
-    n_pred: 24                # prediction number, small value = less accuracy at slow speeds, big value = instability at high speeds
-    decay_factor: 0.9         # decay factor of steering command at zero speed
+    beta: 0.02                # super-twisting error derivative gain
+    phi: 0.5                  # gain for variable boundary layer, small value = accurate but chattering, big value = smooth but less accurate
+    n_pred: 14                # prediction number, small value = less accuracy at slow speeds, big value = instability at high speeds
+    decay_speed: 0.2          # decay speed of steering command near minimum speed
     converged_steer_rad: 0.1  # steering angle threshold for convergence
 
-    # -- lowpass filter for noise reduction --
-    lpf_cutoff_hz: 1.0 # cutoff frequency of lowpass filter [Hz]
+    # -- lowpass filter and rate limit for noise reduction --
+    lpf_cutoff_hz: 1.0        # cutoff frequency of lowpass filter [Hz]
+    cmd_lpf_cutoff_hz: 3.0    # cutoff frequency of lowpass filter for steering command [Hz]
+    steer_rate_lim: 0.3       # steering rate limit [rad/s]
 
     # -- vehicle model --
     vehicle_model_type: "kinematic" # vehicle model type for prediction. option is kinematic, and dynamic

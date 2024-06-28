@@ -23,8 +23,9 @@ SmcLateralController::SmcLateralController(rclcpp::Node & node)
 
   // vehicle parameters
   const auto vehicle_info = vehicle_info_util::VehicleInfoUtil(*node_).getVehicleInfo();
-  m_wheelbase = vehicle_info.wheel_base_m;
+  const double wheelbase = vehicle_info.wheel_base_m;
   const double steer_lim = vehicle_info.max_steer_angle_rad;
+  const double steer_rate_lim = node_->declare_parameter<double>("steer_rate_lim");
 
   // algorithm parameters
   m_traj_resample_dist = node_->declare_parameter<double>("traj_resample_dist");
@@ -33,17 +34,20 @@ SmcLateralController::SmcLateralController(rclcpp::Node & node)
   m_ctrl_period = node_->get_parameter("ctrl_period").as_double();
   m_n_pred = node_->declare_parameter<int>("n_pred");
   m_converged_steer_rad = node_->declare_parameter<double>("converged_steer_rad");
-  const double decay_factor = node_->declare_parameter<double>("decay_factor");
+  const double decay_speed = node_->declare_parameter<double>("decay_speed");
 
   // smc parameters
   const double lambda = node_->declare_parameter<double>("lambda");
   const double alpha = node_->declare_parameter<double>("alpha");
   const double beta = node_->declare_parameter<double>("beta");
-  const double gamma = node_->declare_parameter<double>("gamma");
+  const double phi = node_->declare_parameter<double>("phi");
 
   // initialize smc
-  m_smc_ptr = initializeSMC(steer_lim, decay_factor, m_n_pred);
-  m_smc_ptr->setGains(lambda, alpha, beta, gamma);
+  m_smc_ptr = initializeSMC(steer_lim, steer_rate_lim, decay_speed, m_n_pred);
+  m_smc_ptr->setGains(lambda, alpha, beta, phi);
+
+  // initialize vehicle states
+  m_x_prev = Eigen::VectorXd::Zero(4);
 
   // set parameter callback
   m_set_param_res = node_->add_on_set_parameters_callback(
@@ -56,17 +60,19 @@ SmcLateralController::SmcLateralController(rclcpp::Node & node)
   // initialize lowpass filters
   {
     const double lpf_cutoff_hz = node_->declare_parameter<double>("lpf_cutoff_hz");
-    initializeFilters(lpf_cutoff_hz);
+    const double cmd_lpf_cutoff_hz = node_->declare_parameter<double>("cmd_lpf_cutoff_hz");
+    initializeFilters(lpf_cutoff_hz, cmd_lpf_cutoff_hz);
   }
 
   // vehicle model pointer
-  m_vehicle_model_ptr = createVehicleModel(m_wheelbase, steer_lim);
+  m_vehicle_model_ptr = createVehicleModel(wheelbase, steer_lim);
 }
 
 SmcLateralController::~SmcLateralController()
 {
 }
 
+// Callback function for setting parameters
 rcl_interfaces::msg::SetParametersResult SmcLateralController::paramCallback(
   const std::vector<rclcpp::Parameter> & parameters)
 {
@@ -91,13 +97,13 @@ rcl_interfaces::msg::SetParametersResult SmcLateralController::paramCallback(
     double lambda = node_->get_parameter("lambda").as_double();
     double alpha = node_->get_parameter("alpha").as_double();
     double beta = node_->get_parameter("beta").as_double();
-    double gamma = node_->get_parameter("gamma").as_double();
+    double phi = node_->get_parameter("phi").as_double();
 
     update_param("lambda", lambda);
     update_param("alpha", alpha);
     update_param("beta", beta);
-    update_param("gamma", gamma);
-    m_smc_ptr->setGains(lambda, alpha, beta, gamma);
+    update_param("phi", phi);
+    m_smc_ptr->setGains(lambda, alpha, beta, phi);
   }
 
   rcl_interfaces::msg::SetParametersResult result;
@@ -106,6 +112,7 @@ rcl_interfaces::msg::SetParametersResult SmcLateralController::paramCallback(
   return result;
 }
 
+// Create the vehicle model based on the provided parameters
 std::shared_ptr<Interface> SmcLateralController::createVehicleModel(
   const double wheelbase, const double steer_lim)
 {
@@ -138,16 +145,19 @@ std::shared_ptr<Interface> SmcLateralController::createVehicleModel(
 }
 
 std::unique_ptr<SMC> SmcLateralController::initializeSMC(
-  double steer_lim, double decay_factor, int n_pred)
+  const double steer_lim, const double steer_rate_lim,
+  const double decay_speed, const int n_pred)
 {
   std::unique_ptr<SMC> smc_controller_ptr;
 
   smc_controller_ptr = std::make_unique<SMC>(
-    steer_lim, m_ctrl_period, decay_factor, n_pred);
+    steer_lim, steer_rate_lim, m_ctrl_period,
+    decay_speed, n_pred);
 
   return smc_controller_ptr;
 }
 
+// Run the lateral controller
 trajectory_follower::LateralOutput SmcLateralController::run(
   trajectory_follower::InputData const & input_data)
 {
@@ -155,13 +165,26 @@ trajectory_follower::LateralOutput SmcLateralController::run(
   m_current_trajectory = input_data.current_trajectory;
   m_current_odometry = input_data.current_odometry;
   m_current_steering = input_data.current_steering;
+  m_current_operation_mode = input_data.current_operation_mode;
+
+  // add lookahead distance
+  // NOTE: The lookahead distance does not improve the e_lat accuracy
+  // m_current_odometry = smc_utils::add_lookahead_distance(
+  //   m_current_odometry, 1.0);
+
+  // check if autoware mode and controller mode are enabled
+  bool is_controller_active = false;
+  if (m_current_operation_mode.is_autoware_control_enabled == true &&
+      m_current_operation_mode.mode == 2) {
+    is_controller_active = true;
+  }
 
   // resample the trajectory
-  m_current_trajectory = smc_utils::resample_traj_by_distance(
+  smc_utils::resample_traj_by_distance(
     m_current_trajectory, m_traj_resample_dist);
   if (m_enable_path_smoothing) {
     // smooth the trajectory
-    m_current_trajectory = smc_utils::smooth_trajectory(
+    smc_utils::smooth_trajectory(
       m_current_trajectory, m_path_filter_moving_ave_num);
   }
 
@@ -170,40 +193,44 @@ trajectory_follower::LateralOutput SmcLateralController::run(
   double velocity = m_current_odometry.twist.twist.linear.x;
 
   // update the states
-  Eigen::VectorXd x_curr(4);
-  x_curr = updateStates();
+  auto x_curr = updateStates();
 
-  // update the predictions
-  Eigen::MatrixXd x_pred(4, m_n_pred);
-  x_pred = updatePredictions(x_curr, u_curr, velocity);
+  // calculate the predictions
+  auto [x_pred, odom_pred, k_pred, u_pred] = calculatePredictions(
+    x_curr, u_curr, velocity);  
 
-  // update the velocity and calculate the control command
+  // set the states for the controller
   m_smc_ptr->setVelocity(velocity);
-  m_smc_ptr->getPrediction(x_pred);
-  Eigen::VectorXd ctrl_cmd = m_smc_ptr->calculate(x_pred);
+  m_smc_ptr->setPrediction(x_pred);
+
+  // calculate the control command
+  auto ctrl_cmd = m_smc_ptr->calculate(
+    is_controller_active, u_curr);
+
+  // filter cmd for smoothness
+  ctrl_cmd[0] = m_lpf_cmd.filter(ctrl_cmd[0]);
 
   // debug_values for path tracking
+  // TODO: Publish x_pred, odom_pred, k_pred, u_pred, x_curr, and ctrl_cmd
   Float32MultiArrayStamped debug_values;
 
-  debug_values.data.resize(12);
+  debug_values.data.resize(10);
   debug_values.data[0] = static_cast<float>(x_curr[0]);
   debug_values.data[1] = static_cast<float>(x_curr[1]);
   debug_values.data[2] = static_cast<float>(x_curr[2]);
   debug_values.data[3] = static_cast<float>(x_curr[3]);
-  debug_values.data[4] = static_cast<float>(m_uref);
-  debug_values.data[5] = static_cast<float>(ctrl_cmd[0]);
-  debug_values.data[6] = static_cast<float>(ctrl_cmd[1]);
-  debug_values.data[7] = static_cast<float>(ctrl_cmd[2]);
-  debug_values.data[8] = static_cast<float>(ctrl_cmd[3]);
-  debug_values.data[9] = static_cast<float>(ctrl_cmd[4]);
-  debug_values.data[10] = static_cast<float>(ctrl_cmd[5]);
-  debug_values.data[11] = static_cast<float>(m_curvature);
+  debug_values.data[4] = static_cast<float>(ctrl_cmd[0]);
+  debug_values.data[5] = static_cast<float>(ctrl_cmd[1]);
+  debug_values.data[6] = static_cast<float>(ctrl_cmd[2]);
+  debug_values.data[7] = static_cast<float>(ctrl_cmd[3]);
+  debug_values.data[8] = static_cast<float>(ctrl_cmd[4]);
+  debug_values.data[9] = static_cast<float>(ctrl_cmd[5]);
   debug_values.stamp = node_->now();
 
   publishDebugValues(debug_values);
 
   // predicted trajectory for path tracking
-  publishPredictedTraj(x_pred);
+  publishPredictedTraj(odom_pred);
 
   trajectory_follower::LateralOutput output;
   output.control_cmd.stamp = node_->now();
@@ -216,6 +243,7 @@ trajectory_follower::LateralOutput SmcLateralController::run(
   return output;
 }
 
+// Check if the controller is ready
 bool SmcLateralController::isReady(const trajectory_follower::InputData & input_data)
 {
   const auto unused_variable = input_data;
@@ -223,29 +251,28 @@ bool SmcLateralController::isReady(const trajectory_follower::InputData & input_
   return true;
 }
 
-void SmcLateralController::publishPredictedTraj(const Eigen::MatrixXd & x_pred) const
+// Publish the predicted trajectory
+// TODO: Change the current input by a vector containing the predicted trajectory
+void SmcLateralController::publishPredictedTraj(
+  const std::vector<Odometry> & odom_pred) const
 {
   Trajectory predicted_traj;
   predicted_traj.header.stamp = node_->now();
   predicted_traj.header.frame_id = "map";
 
   TrajectoryPoint p;
-  double velocity = m_current_odometry.twist.twist.linear.x;
-
   for (int i = 0; i < m_n_pred; ++i) {
-    Odometry updated_odometry = smc_utils::update_odometry(
-      m_current_odometry, x_pred.col(i), velocity, (i + 1) * m_ctrl_period);
-
-    p.pose = updated_odometry.pose.pose;
-    p.longitudinal_velocity_mps = updated_odometry.twist.twist.linear.x;
-    p.lateral_velocity_mps = updated_odometry.twist.twist.linear.y;
-    p.heading_rate_rps = updated_odometry.twist.twist.angular.z;
+    p.pose = odom_pred[i].pose.pose;
+    p.longitudinal_velocity_mps = odom_pred[i].twist.twist.linear.x;
+    p.lateral_velocity_mps = odom_pred[i].twist.twist.linear.y;
+    p.heading_rate_rps = odom_pred[i].twist.twist.angular.z;
 
     predicted_traj.points.push_back(p);
   }
   pub_predicted_traj_->publish(predicted_traj);
 }
 
+// Publish the debug values
 void SmcLateralController::publishDebugValues(Float32MultiArrayStamped & debug_values) const
 {
   // debug values
@@ -253,32 +280,41 @@ void SmcLateralController::publishDebugValues(Float32MultiArrayStamped & debug_v
   pub_debug_values_->publish(debug_values);
 }
 
+// Update the states of the lateral controller
 Eigen::VectorXd SmcLateralController::updateStates()
 {
-  Eigen::VectorXd result(4);
+  Eigen::VectorXd x_curr(4);
 
-  double e_lat = smc_utils::calculate_lateral_error(
+  // Calculate the errors
+  x_curr[0] = smc_utils::calculate_lateral_error(
     m_current_trajectory, m_current_odometry);
-  e_lat = m_lpf_e_lat.filter(e_lat);
-  double e_lat_dot = (e_lat - m_e_lat_prev) / m_ctrl_period;
-  m_e_lat_prev = e_lat;
-
-  double e_yaw = smc_utils::calculate_angular_error(
+  x_curr[2] = smc_utils::calculate_angular_error(
     m_current_trajectory, m_current_odometry);
-  e_yaw = m_lpf_e_yaw.filter(e_yaw);
-  double e_yaw_dot = (e_yaw - m_e_yaw_prev) / m_ctrl_period;
-  m_e_yaw_prev = e_yaw;
 
-  result << e_lat, e_lat_dot, e_yaw, e_yaw_dot;
+  // Filter the errors
+  // NOTE: No improvement is observed when smoothing the error derivatives.
+  x_curr[0] = m_lpf_e_lat.filter(x_curr[0]);
+  x_curr[2] = m_lpf_e_yaw.filter(x_curr[2]);
 
-  return result;
+  // Calculate the derivatives
+  x_curr[1] = (x_curr[0] - m_x_prev[0]) / m_ctrl_period;
+  x_curr[3] = (x_curr[2] - m_x_prev[2]) / m_ctrl_period;
+
+  // Update the previous values
+  m_x_prev = x_curr;
+
+  return x_curr;
 }
 
-Eigen::MatrixXd SmcLateralController::updatePredictions(
+// Calculate the predictions
+std::tuple<Eigen::MatrixXd, std::vector<Odometry>, std::vector<double>, std::vector<double>> SmcLateralController::calculatePredictions(
   const Eigen::VectorXd & x0, const double & u_steer, const double & velocity)
 {
   Eigen::VectorXd x_curr(4);
   Eigen::MatrixXd x_pred(4, m_n_pred);
+  std::vector<Odometry> odom_pred(m_n_pred);
+  std::vector<double> k_pred(m_n_pred);
+  std::vector<double> u_pred(m_n_pred);
 
   const int DIM_X = m_vehicle_model_ptr->getDimX();
   const int DIM_U = m_vehicle_model_ptr->getDimU();
@@ -294,31 +330,39 @@ Eigen::MatrixXd SmcLateralController::updatePredictions(
 
   // Perform n_pred predictions and store the results
   x_curr = x0;
+  x_pred = Eigen::MatrixXd::Zero(DIM_X, m_n_pred);
+  odom_pred[0] = m_current_odometry;
+  Eigen::MatrixXd ud = Eigen::MatrixXd::Zero(DIM_U, 1);
   for (int i = 0; i < m_n_pred; ++i) {
-    Odometry updated_odometry = smc_utils::update_odometry(
-      m_current_odometry, x_pred.col(i), velocity, (i + 1) * dt);
-
-    double curvature = smc_utils::calculate_curvature(
-      m_current_trajectory, updated_odometry);
-
-    if (i == m_n_pred - 1) {
-      m_curvature = m_lpf_k.filter(curvature);  // filter the curvature
-      curvature = m_curvature;  // use the filtered curvature
+    // predict odometry
+    // TODO: The odometry prediction is not accurate
+    // this can be improved by using the vehicle model to predict the odometry
+    if (i > 0) {
+      odom_pred[i] = smc_utils::update_odometry(
+        odom_pred[i - 1], dt);
     }
 
+    // predict curvature
+    // NOTE: The curvature prediction improves the e_lat accuracy
+    k_pred[i] = smc_utils::calculate_curvature(
+      m_current_trajectory, odom_pred[i]);
+    
+    // filter curvature
+    // NOTE: The curvature filter smooths the cmd derivative but worsen the e_lat accuracy
+    k_pred[i] = m_lpf_k[i].filter(k_pred[i]);
+
     m_vehicle_model_ptr->setVelocity(velocity);
-    m_vehicle_model_ptr->setCurvature(curvature);
+    m_vehicle_model_ptr->setCurvature(k_pred[i]);
     m_vehicle_model_ptr->calculateDiscreteMatrix(Ad, Bd, Cd, Wd, dt);
     m_vehicle_model_ptr->calculateReferenceInput(Uref);
-    m_uref = Uref(0, 0);
-    Eigen::MatrixXd ud = Eigen::MatrixXd::Zero(DIM_U, 1);
+    u_pred[i] = Uref(0, 0);
     ud(0, 0) = u_steer;
 
     x_curr = Ad * x_curr + Bd * ud + Wd;
     x_pred.col(i) = x_curr;
   }
 
-  return x_pred;
+  return std::make_tuple(x_pred, odom_pred, k_pred, u_pred);
 }
 
 bool SmcLateralController::isSteerConverged(const double & steer_cmd)

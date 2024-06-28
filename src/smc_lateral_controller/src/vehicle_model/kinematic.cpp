@@ -46,21 +46,19 @@ void Kinematic::calculateDiscreteMatrix(
   a_d(0, 2) = m_velocity;
   a_d(1, 3) = m_velocity;
 
-  // add negative feedback terms by substracting identity matrix from a_d
-  // this is to ensure that the system is stable
-  a_d(0, 0) -= m_velocity;
-  a_d(1, 1) -= m_velocity;
-  a_d(2, 2) -= 1.0;
-  a_d(3, 3) -= 1.0;
-
   b_d(2, 0) = m_velocity / m_wheelbase * cos_delta_r_squared_inv;
-  // b_d(3, 0) = m_velocity / m_wheelbase * 2 * cos_delta_r_squared_inv * tan(delta_r);
 
   c_d(0, 0) = 1.0;
   c_d(1, 2) = 1.0;
 
-  w_d(2, 0) = -m_velocity / m_wheelbase * delta_r * cos_delta_r_squared_inv;
-  // w_d(3, 0) = -m_velocity / m_wheelbase * delta_r * 2 * cos_delta_r_squared_inv * tan(delta_r);
+  w_d(2, 0) = -m_velocity / m_wheelbase * cos_delta_r_squared_inv * delta_r;
+
+  // add negative gains in the diagonal of a_d to make the system stable
+  // TODO: make the gains configurable using parameters
+  a_d(0, 0) = -std::max(2.0, 0.5 * m_velocity);
+  a_d(1, 1) = -std::max(2.0, 0.5 * m_velocity);
+  a_d(2, 2) = -2.0;
+  a_d(3, 3) = -2.0;
 
   // bilinear discretization for ZOH system
   // no discretization is needed for Cd

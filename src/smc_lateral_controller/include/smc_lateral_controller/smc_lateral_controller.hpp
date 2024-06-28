@@ -51,6 +51,7 @@ using tier4_debug_msgs::msg::Float32MultiArrayStamped;
 using nav_msgs::msg::Odometry;
 using autoware_auto_vehicle_msgs::msg::SteeringReport;
 using autoware_auto_planning_msgs::msg::TrajectoryPoint;
+using autoware_adapi_v1_msgs::msg::OperationModeState;
 
 class SmcLateralController : public trajectory_follower::LateralControllerBase
 {
@@ -66,12 +67,13 @@ private:
   Trajectory m_current_trajectory;
   Odometry m_current_odometry;
   SteeringReport m_current_steering;
-  double m_curvature;
+  OperationModeState m_current_operation_mode;
 
   // Lowpass filters
-  Butterworth2dFilter m_lpf_k;  // Lowpass filter for smoothing the curvature.
-  Butterworth2dFilter m_lpf_e_lat;      // Lowpass filter for smoothing the lateral error.
-  Butterworth2dFilter m_lpf_e_yaw;      // Lowpass filter for smoothing the heading error.
+  Butterworth2dFilter m_lpf_cmd;    // Lowpass filter for smoothing the control command.
+  Butterworth2dFilter m_lpf_e_lat;  // Lowpass filter for smoothing the lateral error.
+  Butterworth2dFilter m_lpf_e_yaw;  // Lowpass filter for smoothing the heading error.
+  std::vector<Butterworth2dFilter> m_lpf_k;      // Lowpass filter for smoothing the curvature.
 
   // Pointers for vehicle model and SMC controller
   std::shared_ptr<Interface> m_vehicle_model_ptr;
@@ -87,18 +89,14 @@ private:
     const std::vector<rclcpp::Parameter> & parameters);
 
   // Parameters
-  double m_wheelbase;
-  double m_lpf_size_n;
-  double m_e_lat_prev;
-  double m_e_yaw_prev;
+  Eigen::VectorXd m_x_prev;
   double m_ctrl_period;
-  double m_uref;
   double m_converged_steer_rad;
   double m_traj_resample_dist;
   bool m_enable_path_smoothing;
   int m_path_filter_moving_ave_num;
   int m_n_pred;
-
+  
   /**
    * @brief Create the vehicle model based on the provided parameters.
    * @param wheelbase Vehicle's wheelbase.
@@ -111,12 +109,14 @@ private:
   /**
    * @brief Initialize the SMC controller.
    * @param steer_lim Steering command limit.
-   * @param decay_factor Decay factor for the controller.
+   * @param steer_rate_lim Steering rate limit.
+   * @param decay_speed Decay speed near zero speed.
    * @param n_pred Number of prediction steps.
    * @return Pointer to the initialized SMC controller.
    */
   std::unique_ptr<SMC> initializeSMC(
-    double steer_lim, double decay_factor, int n_pred);
+    const double steer_lim, const double steer_rate_lim, 
+    const double decay_speed, const int n_pred);
 
   /**
    * @brief Check if all necessary data is received and ready to run the control.
@@ -135,9 +135,9 @@ private:
 
   /**
    * @brief Publish the predicted future trajectory.
-   * @param x_pred Predicted future trajectory.
+   * @param odom_pred Predicted odometry.
    */
-  void publishPredictedTraj(const Eigen::MatrixXd & x_pred) const;
+  void publishPredictedTraj(const std::vector<Odometry> & odom_pred) const;
 
   /**
    * @brief Publish diagnostic message.
@@ -156,24 +156,29 @@ private:
   Eigen::VectorXd updateStates();
 
   /**
-   * @brief Update predictions
+   * @brief Calculate the state predictions.
    * @param [in] x_curr The initial state vector.
    * @param [in] u_steer The current steering angle.
-   * @param [in] velocity The current ego velocity
-   * @return The updated state at delayed_time.
+   * @param [in] velocity The current ego velocity.
+   * @return The predicted states. 
    */
-  Eigen::MatrixXd updatePredictions(
+  std::tuple<Eigen::MatrixXd, std::vector<Odometry>, std::vector<double>, std::vector<double>> calculatePredictions(
     const Eigen::VectorXd & x_curr, const double & u_steer, const double & velocity);
 
   /**
    * @brief Initialize the lowpass filters.
    * @param lpf_cutoff_hz Cutoff frequency for lowpass filter.
+   * @param cmd_lpf_cutoff_hz Cutoff frequency for lowpass filter of control command.
    */
-  inline void initializeFilters(const double lpf_cutoff_hz)
+  inline void initializeFilters(const double lpf_cutoff_hz, const double cmd_lpf_cutoff_hz)
   {
-    m_lpf_k.initialize(m_ctrl_period, lpf_cutoff_hz);
+    m_lpf_cmd.initialize(m_ctrl_period, cmd_lpf_cutoff_hz);
     m_lpf_e_lat.initialize(m_ctrl_period, lpf_cutoff_hz);
     m_lpf_e_yaw.initialize(m_ctrl_period, lpf_cutoff_hz);
+    m_lpf_k.resize(m_n_pred);
+    for (int i = 0; i < m_n_pred; ++i) {
+      m_lpf_k[i].initialize(m_ctrl_period, cmd_lpf_cutoff_hz);
+    }
   }
 
   /**

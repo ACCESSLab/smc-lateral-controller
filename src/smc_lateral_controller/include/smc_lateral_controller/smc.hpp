@@ -28,44 +28,54 @@ private:
     double lambda;
     double alpha;
     double beta;
-    double gamma;
+    double phi;
   };
   Params m_params;  // sliding mode control parameters
 
   // state variables
   double m_velocity;
+  double m_curvature;
   double m_steer_lim;
+  double m_steer_rate_lim;
   double m_ctrl_period;
-  double m_decay_factor;
-  double m_u2_lat_prev;
-  double m_u2_yaw_prev;
-  double m_ctrl_cmd_prev;
+  double m_decay_speed;
   int m_n_pred;
 
+  // control variables
+  Eigen::VectorXd m_u;
+  double m_u1_lat;
+  double m_u1_yaw;
+  double m_u2_lat;
+  double m_u2_yaw;
+
   // error variables
-  double m_e_lat;
-  double m_e_yaw;
-  double m_e_lat_dot;
-  double m_e_yaw_dot;
+  Eigen::VectorXd m_e_lat;
+  Eigen::VectorXd m_e_yaw;
 
 public:
   /**
    * @brief constructor
    *
    * @param steer_lim The steering limit in radians.
+   * @param steer_rate_lim The steering rate limit in radians per second.
    * @param ctrl_period The control period in seconds.
-   * @param decay_factor The decay factor for the controller.
+   * @param decay_speed The decay speed near zero speed.
    * @param n_pred The number of prediction steps.
    */
   SMC(
     const double & steer_lim,
+    const double & steer_rate_lim,
     const double & ctrl_period,
-    const double & decay_factor,
+    const double & decay_speed,
     const int & n_pred)
   : m_steer_lim(steer_lim),
+    m_steer_rate_lim(steer_rate_lim),
     m_ctrl_period(ctrl_period),
-    m_decay_factor(decay_factor),
-    m_n_pred(n_pred)
+    m_decay_speed(decay_speed),
+    m_n_pred(n_pred - 1),
+    m_u(Eigen::VectorXd::Zero(2)),
+    m_e_lat(Eigen::VectorXd::Zero(2)),
+    m_e_yaw(Eigen::VectorXd::Zero(2))
   {
     // Initialize other member variables if needed
   }
@@ -78,58 +88,66 @@ public:
   void setVelocity(const double & velocity);
 
   /**
+   * @brief Sets the curvature for the lateral controller.
+   *
+   * @param curvature The current curvature in radians per meter.
+   */
+  void setCurvature(const double & curvature);
+
+  /**
    * @brief Sets the gains for the lateral and yaw controllers.
    *
-   * @param lambda The gain for lateral error control.
+   * @param lambda The gain for error control.
    * @param alpha The gain for error control.
-   * @param beta The gain for derivative control.
-   * @param gamma The gain for control input.
+   * @param beta The gain for error derivative control.
+   * @param phi The gain for control input.
    */
   void setGains(
     const double & lambda,
     const double & alpha,
     const double & beta,
-    const double & gamma);
+    const double & phi);
 
   /**
-   * @brief Calculates the desired control output based on the predicted state.
+   * @brief Calculates the control command.
    *
-   * This function takes in a predicted state matrix and calculates the desired control output
-   * using a specific algorithm.
+   * @param is_controller_active The controller activation flag.
+   * @param u_curr The current steering tire angle
    *
-   * @param x_pred The predicted state matrix.
-   * @return The calculated control output.
+   * @return The control command.
    */
-  Eigen::VectorXd calculate(const Eigen::MatrixXd & x_pred);
+  Eigen::VectorXd calculate(
+    const bool & is_controller_active, const double & u_curr);
 
   /**
-   * @brief Calculates the prediction vector for the given input matrix.
-   *
-   * This function takes an input matrix x_pred and returns a prediction vector.
-   * The prediction vector is calculated using Eigen::VectorXd.
+   * @brief Sets the prediction vector for the given input matrix.
    *
    * @param x_pred The input matrix for which the prediction vector is calculated.
    */
-  void getPrediction(const Eigen::MatrixXd & x_pred);
+  void setPrediction(const Eigen::MatrixXd & x_pred);
 
   /**
    * @brief Applies the Super Twisting Algorithm (STA) to calculate the control input.
    *
-   * This function implements the Super Twisting Algorithm (STA) for lateral control.
-   * It takes the error (e), error derivative (e_dot), and the previous control
-   * input (u2_prev) as inputs and returns the control input as a vector of doubles.
-   *
-   * @param e The error between the desired and actual lateral position.
-   * @param e_dot The derivative of the error.
-   * @param u2_prev The previous control input.
-   * @param lambda The gain for lateral error control.
+   * @param e The error vector.
+   * @param u1 The first control input.
+   * @param u2 The second control input.
+   * @param lambda The gain for error control.
    * @param alpha The gain for error control.
-   * @param beta The gain for derivative control.
-   * @return The control input as a vector of doubles.
+   * @param beta The gain for error derivative control.
+   * @param is_controller_active The controller activation flag.
    */
-  Eigen::VectorXd superTwistingAlgorithm(
-    const double & e, const double & e_dot, const double & u2_prev,
-    const double & lambda, const double & alpha, const double & beta);
+  void superTwistingAlgorithm(
+    const Eigen::VectorXd & e, double & u1, double & u2,
+    const double & lambda, const double & alpha, const double & beta,
+    const bool & is_controller_active);
+
+  /**
+   * @brief Limit the control command and rate.
+   *
+   * @return The control command and rate are updated.
+   */
+  void limitSteeringAngle(Eigen::VectorXd & u);
 };
 }  // namespace autoware::motion::control::smc_lateral_controller
 #endif  // SMC_LATERAL_CONTROLLER__SMC_HPP_

@@ -39,45 +39,77 @@ using autoware_auto_planning_msgs::msg::TrajectoryPoint;
 using nav_msgs::msg::Odometry;
 using geometry_msgs::msg::Pose;
 using geometry_msgs::msg::Vector3;
-// Define a line segment that connects the three nearest points
-std::tuple<Pose, Pose, Pose> calculate_nearest_poses(
-  const Trajectory & trajectory, const Odometry & odometry);
 
-// Calculate the curvature of the path given three points
+/**
+ * @brief Calculate the curvature of the path
+ * @param trajectory The trajectory
+ * @param odometry The odometry of the vehicle
+ * @return The curvature
+ */
 double calculate_curvature(
   const Trajectory & trajectory,
   const Odometry & odometry);
 
-// Normalize the angle to the range [-pi, pi]
-double normalize_angle(const double & angle);
-
-// Finds the two nearest points on the trajectory to the current position
+/**
+ * @brief Calculate the lateral error between the vehicle and the trajectory
+ * @param trajectory The trajectory
+ * @param odometry The odometry of the vehicle
+ * @return The lateral error
+ */
 double calculate_lateral_error(
   const Trajectory & trajectory,
   const Odometry & odometry);
 
-// Finds the angular error between the vehicle orientation and the nearest line
+/**
+ * @brief Calculate the angular error between the vehicle and the trajectory
+ * @param trajectory The trajectory
+ * @param odometry The odometry of the vehicle
+ * @return The angular error
+ */
 double calculate_angular_error(
   const Trajectory & trajectory,
   const Odometry & odometry);
 
-// update the odometry with the current state
+/**
+ * @brief Update the odometry of the vehicle
+ * @param odometry The current odometry
+ * @param dt The time step
+ * @return The updated odometry
+ */
 Odometry update_odometry(
-  const Odometry & odometry, const Eigen::VectorXd & x_curr,
-  const double & velocity, const double & dt);
+  const Odometry & odometry, const double & dt);
 
-// Resample the trajectory to have a constant distance between points
-Trajectory resample_traj_by_distance(
-  const Trajectory & trajectory,
-  const double & ds);
+/**
+ * @brief Resample the trajectory by distance
+ * @param traj The trajectory to resample
+ * @param ds The distance between points
+ */
+void resample_traj_by_distance(
+  Trajectory & traj, const double & ds);
 
-// Smooth the trajectory using a moving average
-Trajectory smooth_trajectory(
-  const Trajectory & trajectory, const int & path_filter_moving_ave_num);
+/**
+ * @brief Smooth the trajectory using a moving average filter
+ * @param traj The trajectory to smooth
+ * @param path_filter_moving_ave_num The number of points to average
+ */
+void smooth_trajectory(
+  Trajectory & traj, const int & path_filter_moving_ave_num);
 
-// Calculate the distance between two points
+/**
+ * @brief Get the quaternion from the yaw angle
+ * @param yaw The yaw angle
+ * @return The quaternion
+ */
 geometry_msgs::msg::Quaternion get_quaternion_from_yaw(const double yaw);
 
+/**
+ * @brief Add a lookahead distance to the odometry
+ * @param odometry The odometry
+ * @param lookahead_distance The lookahead distance
+ * @return The updated odometry
+ */
+Odometry add_lookahead_distance(
+  const Odometry & odometry, const double & lookahead_distance);
 }  // namespace smc_utils
 
 #endif  // SMC_UTILS_HPP_

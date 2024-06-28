@@ -17,114 +17,126 @@
 namespace autoware::motion::control::smc_lateral_controller
 {
 
-// The setGains function updates the SMC parameters with the provided values.
+// Update the SMC parameters with the provided values.
 void SMC::setGains(
   const double & lambda,
   const double & alpha,
   const double & beta,
-  const double & gamma
+  const double & phi
 )
 {
   m_params.lambda = lambda;
   m_params.alpha = alpha;
   m_params.beta = beta;
-  m_params.gamma = gamma;
+  m_params.phi = phi;
 }
 
-// The calculate function computes the control command and its rate from 'x_pred'
-// using the Super Twisting Algorithm. It returns a vector containing the control
-// command, its rate, and the control vectors 'u_lat_12' and 'u_yaw_12'.
-Eigen::VectorXd SMC::calculate(const Eigen::MatrixXd & x_pred)
+// Compute the control command.
+Eigen::VectorXd SMC::calculate(
+  const bool & is_controller_active, const double & u_curr)
 {
-  // Get the lateral and yaw errors and their derivatives from 'x_pred'
-  getPrediction(x_pred);
+  // Calculate the control inputs using the Super Twisting Algorithm
+  superTwistingAlgorithm(m_e_lat, m_u1_lat, m_u2_lat,
+    m_params.lambda, m_params.alpha, m_params.beta,
+    is_controller_active);
+  superTwistingAlgorithm(m_e_yaw, m_u1_yaw, m_u2_yaw,
+    m_params.lambda, m_params.alpha, m_params.beta,
+    is_controller_active);
 
-  // Set the gains for the Super Twisting Algorithm
-  double gain_e_lat = 1.0;
-  double gain_e_yaw = 1.0;
-
-  // Calculate the control vectors 'u_lat_12' and 'u_yaw_12'
-  // using the Super Twisting Algorithm
-  Eigen::VectorXd u_lat_12, u_yaw_12;
-  u_lat_12 = superTwistingAlgorithm(
-    m_e_lat, m_e_lat_dot, m_u2_lat_prev,
-    gain_e_lat * m_params.lambda,
-    gain_e_lat * m_params.alpha,
-    gain_e_lat * m_params.beta);
-  u_yaw_12 = superTwistingAlgorithm(
-    m_e_yaw, m_e_yaw_dot, m_u2_yaw_prev,
-    gain_e_yaw * m_params.lambda,
-    gain_e_yaw * m_params.alpha,
-    gain_e_yaw * m_params.beta);
-
-  // Update the previous control inputs
-  m_u2_lat_prev = u_lat_12[1];
-  m_u2_yaw_prev = u_yaw_12[1];
-
-  // Calculate the control command
-  double ctrl_cmd = u_lat_12[0] + u_yaw_12[0];
-  // Limit the control command to the maximum steering angle
-  if (std::abs(ctrl_cmd) >= m_steer_lim) {
-    ctrl_cmd = m_steer_lim * std::copysign(1.0, ctrl_cmd);
+  // Calculate the control command and rate
+  Eigen::VectorXd cmd(2);
+  if (is_controller_active) {
+    cmd[0] = m_u1_lat + m_u1_yaw;
+  } else {
+    cmd[0] = u_curr;
+    m_u1_lat = 0.0;
+    m_u1_yaw = 0.0;
+    m_u2_lat = 0.0;
+    m_u2_yaw = 0.0;
   }
+  cmd[1] = (cmd[0] - m_u[0]) / m_ctrl_period;
+  
+  // Limit the steering angle and rate
+  limitSteeringAngle(cmd);
+  
+  // Update the previous control command
+  m_u = cmd;
 
-  // Calculate the control command rate
-  double ctrl_cmd_rate = (ctrl_cmd - m_ctrl_cmd_prev) / m_ctrl_period;
-  m_ctrl_cmd_prev = ctrl_cmd;  // Update the previous control command
+  // Return the output command
+  Eigen::VectorXd output(6);
+  output << cmd, m_u1_lat, m_u1_yaw, m_u2_lat, m_u2_yaw;
 
-  // Create a vector 'result' containing the control command, its rate,
-  // and the control vectors 'u_lat_12' and 'u_yaw_12'.
-  Eigen::VectorXd result(6);
-  result << ctrl_cmd, ctrl_cmd_rate, u_lat_12, u_yaw_12;
-  return result;
+  return output;
 }
 
-// The getPrediction function extracts the lateral and yaw errors and their
-// derivatives from 'x_pred' and returns them as a vector.
-void SMC::getPrediction(const Eigen::MatrixXd & x_pred)
+// Update the current prediction with the provided value.
+void SMC::setPrediction(const Eigen::MatrixXd & x_pred)
 {
-  m_e_lat = x_pred(0, static_cast<int>(m_n_pred * 1 / 2));
-  m_e_lat_dot = x_pred(1, static_cast<int>(m_n_pred * 1 / 2));
-  m_e_yaw = x_pred(2, m_n_pred - 1);
-  m_e_yaw_dot = x_pred(3, m_n_pred - 1);
+  // Extract the lateral and yaw errors and their derivatives
+  m_e_lat[0] = x_pred(0, m_n_pred);
+  m_e_lat[1] = x_pred(1, m_n_pred);
+  m_e_yaw[0] = x_pred(2, m_n_pred);
+  m_e_yaw[1] = x_pred(3, m_n_pred);
 }
 
-// The setVelocity function updates the current velocity with the provided value.
+// Update the current velocity with the provided value.
 void SMC::setVelocity(const double & velocity)
 {
   m_velocity = velocity;
 }
 
-// The superTwistingAlgorithm function implements the Super Twisting Algorithm,
-// a second-order sliding mode control method. It calculates the sliding surface
-// 's_curr' and the saturation 's_sat' based on the current error 'e', its derivative
-// 'e_dot', and the previous control input 'u2_prev'. It then computes a 2D control
-// vector 'u' based on these values and various parameters. The function returns this
-// control vector 'u'.
-Eigen::VectorXd SMC::superTwistingAlgorithm(
-  const double & e, const double & e_dot, const double & u2_prev,
-  const double & lambda, const double & alpha, const double & beta)
+// Update the current curvature with the provided value.
+void SMC::setCurvature(const double & curvature)
 {
-  // set gamma
-  const double gamma = m_params.gamma;
+  m_curvature = curvature;
+}
 
+// Implement the Super Twisting Algorithm (STA) for lateral control.
+void SMC::superTwistingAlgorithm(
+  const Eigen::VectorXd & e, double & u1, double & u2,
+  const double & lambda, const double & alpha, const double & beta,
+  const bool & is_controller_active)
+{
   // Calculate the sliding surface
-  double s_curr = e_dot + lambda * e;
+  double s_curr = e[1] + lambda * e[0];
 
   // Calculate the boundary layer
-  const double phi = std::max(1.0, std::abs(gamma * m_velocity));
+  // TODO: make the minimum boundary layer configurable using parameters
+  double phi = std::max(
+    2.0, std::abs(m_params.phi * m_velocity));
 
-  // sliding surface normalized by boundary layer
-  // double s_phi = std::max(-1.0, std::min(1.0, s_curr / phi));
+  // Normalize the sliding surface
   double s_phi = std::tanh(s_curr / phi);
 
-  // Calculate the control input using the Super Twisting Algorithm
-  Eigen::VectorXd u(2);
-  u << -alpha * std::sqrt(std::abs(s_phi)) * s_phi + u2_prev,
-    (std::abs(m_velocity) > 0.1) ?
-    -beta * m_velocity * s_phi * m_ctrl_period + u2_prev :
-    u2_prev * m_decay_factor;
+  // Calulate the second control input
+  u2 = ((std::abs(m_velocity) > m_decay_speed) && (is_controller_active))?
+    -beta * m_velocity * s_phi * m_ctrl_period + u2 : u2 * m_decay_speed;
+  
+  // Calculate the first control input
+  u1 = -alpha * std::sqrt(std::abs(s_phi)) * s_phi + u2;
+  
+  // Limit the first and second control input
+  if (std::abs(u1) >= m_steer_lim) {
+    u1 = m_steer_lim * std::copysign(1.0, u1);
+  }
+  if (std::abs(u2) >= m_steer_lim) {
+    u2 = m_steer_lim * std::copysign(1.0, u2);
+  }
+}
 
-  return u;
+// Limit the steering angle and rate.
+void SMC::limitSteeringAngle(Eigen::VectorXd & cmd)
+{
+  // Limit the control rate to the maximum steering rate
+  if (std::abs(cmd[1]) >= m_steer_rate_lim) {
+    cmd[1] = m_steer_rate_lim * std::copysign(1.0, cmd[1]);
+
+    // Calculate the control command based on the limited rate
+    cmd[0] = m_u[0] + cmd[1] * m_ctrl_period;
+  }
+  // Limit the control command to the maximum steering angle
+  if (std::abs(cmd[0]) >= m_steer_lim) {
+    cmd[0] = m_steer_lim * std::copysign(1.0, cmd[0]);
+  }
 }
 }  // namespace autoware::motion::control::smc_lateral_controller

@@ -22,13 +22,9 @@ The SMC robustness was verified using `failure_injection` node (noise injection 
 
 ![Alt Text](image/autoware_integration.png)
 
-An example of the performance of the robust SMC for resilient path tracking amid sensor interference is next:
+An example of the performance of the robust SMC for resilient path tracking amid sensor interference ($\sigma_{xy}=0.16 m$) is next:
 
-| $\sigma_{xy}=0.16 m$ | $\sigma_{\psi}=0.04 rad$ |
-| --------------- | --------------- |
-| ![Alt Text](animation/smc_robustness_analysis_xy_std016.gif) | ![Alt Text](animation/smc_robustness_analysis_yaw_std004.gif) |
-| $\sigma_{vx}=0.64 m/s$ | $\sigma_{\delta}=0.02 rad$ |
-| ![Alt Text](animation/smc_robustness_analysis_xy_std016.gif) | ![Alt Text](animation/smc_robustness_analysis_yaw_std004.gif) |
+![Alt Text](animation/smc_robustness_analysis_xy_std016.gif)
 
 ### Inputs
 
@@ -52,17 +48,20 @@ The default parameters defined in `config/smc_lateral_controller.param.yaml` are
 
 | Name                                         | Type   | Description                                                                                                                                          | Default value |
 | :------------------------------------------- | :----- | :--------------------------------------------------------------------------------------------------------------------------------------------------- | :------------ |
-| enable_path_smoothing | bool | smoothing flag. This should be true when uses path resampling to reduce resampling noise. | false |
+| enable_path_smoothing | bool | smoothing flag. This should be true when uses path resampling to reduce resampling noise. | true |
 | path_filter_moving_ave_num | int | number of data points moving average filter for path smoothing | 25 |
 | traj_resample_dist | double | distance of waypoints in resampling | 0.1 |
 | lambda | double | sliding surface error gain | 24.0 |
 | alpha | double | super-twisting  error gain | 0.8 |
 | beta | double | super-twisting derivative error gain | 0.04 |
-| gamma | double | variable boundary layer gain | 1.0 |
+| min_phi | double | gain for constant boundary layer | 5.0 |
+| phi | double | gain for variable boundary layer | 1.0 |
 | n_pred |  int | lateral/yaw error prediction | 24 |
-| decay_factor | double | decay factor of steering command at zero speed | 0.9 |
+| decay_speed | double | decay speed of steering command at zero speed | 0.2 |
 | converged_steer_rad | double | steering angle threshold for convergence | 0.1 |
 | lpf_cutoff_hz | double | cutoff frequency of lowpass filter | 1.0 |
+| cmd_lpf_cutoff_hz | double | cutoff frequency of lowpass filter for steering command | 3.0 |
+| steer_rate_lim | double | steering rate limit [rad/s] | 0.6 |
 | vehicle_model_type | string | vehicle model type for prediction. options are kinematic, and dynamic |
 
 ##### For dynamics model (WIP)
